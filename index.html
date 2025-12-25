@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FireKiosk — Показ заказов</title>
+<title>FairKiosk — Показ заказов</title>
 
 <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
@@ -49,12 +49,6 @@ header{
   border-bottom:1px solid var(--border);
 }
 
-#logo{
-  width:48px;
-  height:48px;
-  cursor:pointer;
-}
-
 .board{
   flex:1;
   display:grid;
@@ -97,51 +91,6 @@ header{
   letter-spacing:3px;
   border:1px solid var(--border);
 }
-
-/* STAFF MENU */
-#staffMenu{
-  position:fixed;
-  inset:0;
-  background:rgba(0,0,0,.75);
-  display:none;
-  align-items:center;
-  justify-content:center;
-  z-index:999;
-}
-
-#staffBox{
-  background:var(--card);
-  color:var(--text);
-  padding:20px;
-  width:340px;
-  border-radius:16px;
-  border:1px solid var(--border);
-}
-
-#staffBox h3{ margin-top:0 }
-
-#staffBox input,
-#staffBox button,
-#staffBox label{
-  width:100%;
-  padding:10px;
-  margin-bottom:10px;
-  border-radius:8px;
-  border:1px solid var(--border);
-  background:var(--bg);
-  color:var(--text);
-}
-
-#staffBox button{
-  cursor:pointer;
-  font-weight:700;
-}
-
-#terminalList div{
-  display:flex;
-  justify-content:space-between;
-  margin-bottom:6px;
-}
 </style>
 </head>
 
@@ -149,11 +98,8 @@ header{
 <div class="app">
 
 <header>
-  <div id="logo">
-    <!-- SVG FireKiosk -->
-  </div>
   <div style="font-size:20px;font-weight:800">
-    FairDone — твой заказ сдесь
+    FairDone — твой заказ здесь
   </div>
 </header>
 
@@ -171,116 +117,14 @@ header{
 
 </div>
 
-<!-- STAFF MENU -->
-<div id="staffMenu">
-  <div id="staffBox">
-    <h3>Персональное меню</h3>
-
-    <label>
-      <input type="checkbox" id="themeToggle">
-      Светлая тема
-    </label>
-
-    <hr>
-
-    <input id="terminalInput" placeholder="ID терминала">
-    <button id="addTerminal">Добавить терминал</button>
-    <button id="resetTerminals">Reset терминалов</button>
-
-    <div id="terminalList"></div>
-
-    <button id="closeStaff">Закрыть</button>
-  </div>
-</div>
-
 <script>
-/* STATE */
-const body = document.body;
 const listCooking = document.getElementById('listCooking');
 const listReady   = document.getElementById('listReady');
 
 let orders = new Map();
 let terminals = JSON.parse(localStorage.getItem('terminals') || '[]');
+let spoken = new Set();
 
-/* THEME */
-const themeToggle = document.getElementById('themeToggle');
-const savedTheme = localStorage.getItem('theme');
-
-if(savedTheme === 'light'){
-  body.classList.add('light');
-  themeToggle.checked = true;
-}
-
-themeToggle.onchange = ()=>{
-  if(themeToggle.checked){
-    body.classList.add('light');
-    localStorage.setItem('theme','light');
-  }else{
-    body.classList.remove('light');
-    localStorage.setItem('theme','dark');
-  }
-};
-
-/* STAFF MENU */
-const logo = document.getElementById('logo');
-const staffMenu = document.getElementById('staffMenu');
-const terminalInput = document.getElementById('terminalInput');
-const addTerminal = document.getElementById('addTerminal');
-const resetBtn = document.getElementById('resetTerminals');
-const terminalList = document.getElementById('terminalList');
-const closeStaff = document.getElementById('closeStaff');
-
-let clicks = 0;
-logo.onclick = ()=>{
-  clicks++;
-  setTimeout(()=>clicks=0,400);
-  if(clicks === 3){
-    staffMenu.style.display = 'flex';
-    renderTerminals();
-    clicks = 0;
-  }
-};
-
-closeStaff.onclick = ()=>{
-  staffMenu.style.display = 'none';
-};
-
-addTerminal.onclick = ()=>{
-  const id = terminalInput.value.trim();
-  if(!id || terminals.includes(id)) return;
-  terminals.push(id);
-  localStorage.setItem('terminals',JSON.stringify(terminals));
-  terminalInput.value='';
-  renderTerminals();
-  refresh();
-};
-
-resetBtn.onclick = ()=>{
-  terminals = [];
-  localStorage.removeItem('terminals');
-  renderTerminals();
-  refresh();
-};
-
-function renderTerminals(){
-  terminalList.innerHTML='';
-  terminals.forEach(t=>{
-    const row=document.createElement('div');
-    row.textContent=t;
-    const del=document.createElement('button');
-    del.textContent='×';
-    del.onclick=()=>{
-      terminals=terminals.filter(x=>x!==t);
-      localStorage.setItem('terminals',JSON.stringify(terminals));
-      renderTerminals();
-      refresh();
-    };
-    row.appendChild(del);
-    terminalList.appendChild(row);
-  });
-}
-
-/* ORDERS */
 function renderOrder(num){
   const d=document.createElement('div');
   d.className='order';
@@ -289,10 +133,11 @@ function renderOrder(num){
 }
 
 function speakOrder(num){
+  if(spoken.has(num)) return;
+  spoken.add(num);
   try{
     const msg = new SpeechSynthesisUtterance(`Заказ номер ${num} готов`);
     msg.lang = 'ru-RU';
-    speechSynthesis.cancel();
     speechSynthesis.speak(msg);
   }catch(e){}
 }
@@ -304,15 +149,19 @@ function refresh(){
 
   for(const [,o] of orders){
     if(!terminals.includes(o.terminalId)) continue;
-    if(o.status === 'waiting_for_cash') continue;
+
+    if(
+      o.status === 'waiting_for_cash' ||
+      o.status === 'rejected'
+    ) continue;
 
     if(o.status === 'cooking'){
       listCooking.appendChild(renderOrder(o.orderNumber));
     }
-    if(o.status === 'completed' || o.status === 'ready'){
+
+    if(o.status === 'ready' || o.status === 'completed'){
       listReady.appendChild(renderOrder(o.orderNumber));
       speakOrder(o.orderNumber);
-      setTimeout(()=>refresh(),120000);
     }
   }
 }

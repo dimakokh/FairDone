@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FireKiosk — Показ заказов</title>
+
+<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
+
+<style>
+:root{
+  --bg:#0e0e0e;
+  --text:#ffffff;
+  --card:#151515;
+  --border:#222;
+  --cook:#c62828;
+  --ready:#2e7d32;
+}
+
+body.light{
+  --bg:#f4f4f4;
+  --text:#111;
+  --card:#ffffff;
+  --border:#ddd;
+  --cook:#ff5252;
+  --ready:#4caf50;
+}
+
+html,body{
+  margin:0;
+  height:100%;
+  background:var(--bg);
+  color:var(--text);
+  font-family:Inter,system-ui;
+}
+
+.app{
+  height:100%;
+  display:flex;
+  flex-direction:column;
+}
+
+header{
+  display:flex;
+  align-items:center;
+  gap:14px;
+  padding:16px 24px;
+  border-bottom:1px solid var(--border);
+}
+
+#logo{
+  width:48px;
+  height:48px;
+  cursor:pointer;
+}
+
+.board{
+  flex:1;
+  display:grid;
+  grid-template-columns:1fr 1fr;
+}
+
+.column{
+  display:flex;
+  flex-direction:column;
+}
+
+.column-header{
+  text-align:center;
+  padding:14px;
+  font-weight:800;
+  font-size:18px;
+  color:#fff;
+}
+
+.cooking .column-header{ background:var(--cook); }
+.ready .column-header{ background:var(--ready); }
+
+.list{
+  flex:1;
+  padding:20px;
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+  gap:16px;
+}
+
+.order{
+  background:var(--card);
+  border-radius:18px;
+  height:120px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:36px;
+  font-weight:900;
+  letter-spacing:3px;
+  border:1px solid var(--border);
+}
+
+/* STAFF MENU */
+#staffMenu{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.75);
+  display:none;
+  align-items:center;
+  justify-content:center;
+  z-index:999;
+}
+
+#staffBox{
+  background:var(--card);
+  color:var(--text);
+  padding:20px;
+  width:340px;
+  border-radius:16px;
+  border:1px solid var(--border);
+}
+
+#staffBox h3{ margin-top:0 }
+
+#staffBox input,
+#staffBox button,
+#staffBox label{
+  width:100%;
+  padding:10px;
+  margin-bottom:10px;
+  border-radius:8px;
+  border:1px solid var(--border);
+  background:var(--bg);
+  color:var(--text);
+}
+
+#staffBox button{
+  cursor:pointer;
+  font-weight:700;
+}
+
+#terminalList div{
+  display:flex;
+  justify-content:space-between;
+  margin-bottom:6px;
+}
+</style>
+</head>
+
+<body>
+<div class="app">
+
+<header>
+  <div id="logo">
+    <!-- SVG FireKiosk -->
+  </div>
+  <div style="font-size:20px;font-weight:800">
+    FairDone — твой заказ сдесь
+  </div>
+</header>
+
+<div class="board">
+  <div class="column cooking">
+    <div class="column-header">Готовится</div>
+    <div class="list" id="listCooking"></div>
+  </div>
+
+  <div class="column ready">
+    <div class="column-header">Готово</div>
+    <div class="list" id="listReady"></div>
+  </div>
+</div>
+
+</div>
+
+<!-- STAFF MENU -->
+<div id="staffMenu">
+  <div id="staffBox">
+    <h3>Персональное меню</h3>
+
+    <label>
+      <input type="checkbox" id="themeToggle">
+      Светлая тема
+    </label>
+
+    <hr>
+
+    <input id="terminalInput" placeholder="ID терминала">
+    <button id="addTerminal">Добавить терминал</button>
+    <button id="resetTerminals">Reset терминалов</button>
+
+    <div id="terminalList"></div>
+
+    <button id="closeStaff">Закрыть</button>
+  </div>
+</div>
+
+<script>
+/* STATE */
+const body = document.body;
+const listCooking = document.getElementById('listCooking');
+const listReady   = document.getElementById('listReady');
+
+let orders = new Map();
+let terminals = JSON.parse(localStorage.getItem('terminals') || '[]');
+
+/* THEME */
+const themeToggle = document.getElementById('themeToggle');
+const savedTheme = localStorage.getItem('theme');
+
+if(savedTheme === 'light'){
+  body.classList.add('light');
+  themeToggle.checked = true;
+}
+
+themeToggle.onchange = ()=>{
+  if(themeToggle.checked){
+    body.classList.add('light');
+    localStorage.setItem('theme','light');
+  }else{
+    body.classList.remove('light');
+    localStorage.setItem('theme','dark');
+  }
+};
+
+/* STAFF MENU */
+const logo = document.getElementById('logo');
+const staffMenu = document.getElementById('staffMenu');
+const terminalInput = document.getElementById('terminalInput');
+const addTerminal = document.getElementById('addTerminal');
+const resetBtn = document.getElementById('resetTerminals');
+const terminalList = document.getElementById('terminalList');
+const closeStaff = document.getElementById('closeStaff');
+
+let clicks = 0;
+logo.onclick = ()=>{
+  clicks++;
+  setTimeout(()=>clicks=0,400);
+  if(clicks === 3){
+    staffMenu.style.display = 'flex';
+    renderTerminals();
+    clicks = 0;
+  }
+};
+
+closeStaff.onclick = ()=>{
+  staffMenu.style.display = 'none';
+};
+
+addTerminal.onclick = ()=>{
+  const id = terminalInput.value.trim();
+  if(!id || terminals.includes(id)) return;
+  terminals.push(id);
+  localStorage.setItem('terminals',JSON.stringify(terminals));
+  terminalInput.value='';
+  renderTerminals();
+  refresh();
+};
+
+resetBtn.onclick = ()=>{
+  terminals = [];
+  localStorage.removeItem('terminals');
+  renderTerminals();
+  refresh();
+};
+
+function renderTerminals(){
+  terminalList.innerHTML='';
+  terminals.forEach(t=>{
+    const row=document.createElement('div');
+    row.textContent=t;
+    const del=document.createElement('button');
+    del.textContent='×';
+    del.onclick=()=>{
+      terminals=terminals.filter(x=>x!==t);
+      localStorage.setItem('terminals',JSON.stringify(terminals));
+      renderTerminals();
+      refresh();
+    };
+    row.appendChild(del);
+    terminalList.appendChild(row);
+  });
+}
+
+/* ORDERS */
+function renderOrder(num){
+  const d=document.createElement('div');
+  d.className='order';
+  d.textContent=num;
+  return d;
+}
+
+function speakOrder(num){
+  try{
+    const msg = new SpeechSynthesisUtterance(`Заказ номер ${num} готов`);
+    msg.lang = 'ru-RU';
+    speechSynthesis.cancel();
+    speechSynthesis.speak(msg);
+  }catch(e){}
+}
+
+function refresh(){
+  listCooking.innerHTML='';
+  listReady.innerHTML='';
+  if(terminals.length === 0) return;
+
+  for(const [,o] of orders){
+    if(!terminals.includes(o.terminalId)) continue;
+    if(o.status === 'waiting_for_cash') continue;
+
+    if(o.status === 'cooking'){
+      listCooking.appendChild(renderOrder(o.orderNumber));
+    }
+    if(o.status === 'completed' || o.status === 'ready'){
+      listReady.appendChild(renderOrder(o.orderNumber));
+      speakOrder(o.orderNumber);
+      setTimeout(()=>refresh(),120000);
+    }
+  }
+}
+
+/* FIREBASE */
+firebase.initializeApp({
+  apiKey: "AIzaSyABvY_6cHonbLvdBj5cYMSheJDLMd_-bNw",
+  authDomain: "app-fairpay.firebaseapp.com",
+  databaseURL: "https://app-fairpay-default-rtdb.firebaseio.com",
+  projectId: "app-fairpay",
+  storageBucket: "app-fairpay.firebasestorage.app",
+  messagingSenderId: "29576302334",
+  appId: "1:29576302334:web:0e559f804bf62c59981faf"
+});
+
+const ref = firebase.database().ref('orders');
+
+ref.on('child_added', s=>{
+  orders.set(s.key,s.val());
+  refresh();
+});
+ref.on('child_changed', s=>{
+  orders.set(s.key,s.val());
+  refresh();
+});
+ref.on('child_removed', s=>{
+  orders.delete(s.key);
+  refresh();
+});
+</script>
+</body>
+</html>

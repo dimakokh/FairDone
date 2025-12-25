@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FireKiosk — Показ заказов</title>
+<title>FairDone — Показ заказов</title>
 
 <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
@@ -198,6 +198,11 @@ const body = document.body;
 const listCooking = document.getElementById('listCooking');
 const listReady   = document.getElementById('listReady');
 
+/*
+ orders: Map<firebaseKey, orderObject>
+ terminals: array of terminal IDs saved in localStorage
+ spokenOrders: Set of firebase keys we've already announced (prevents duplicates)
+*/
 let orders = new Map();
 let terminals = JSON.parse(localStorage.getItem('terminals') || '[]');
 let spokenOrders = new Set();
@@ -280,7 +285,7 @@ function renderTerminals(){
   });
 }
 
-/* ORDERS */
+/* ORDERS UI helpers */
 function renderOrder(num){
   const d=document.createElement('div');
   d.className='order';
@@ -288,29 +293,66 @@ function renderOrder(num){
   return d;
 }
 
-function speakOrder(num){
-  if(spokenOrders.has(num)) return;
-  spokenOrders.add(num);
-  try{
-    const msg = new SpeechSynthesisUtterance(`Заказ номер ${num} готов`);
-    msg.lang = 'ru-RU';
-    speechSynthesis.cancel();
-    speechSynthesis.speak(msg);
-  }catch(e){}
+/*
+  speakOrderForKey:
+  - Uses firebase key as identifier to avoid duplicate announcements for same orderNumber reused elsewhere.
+  - Adds key to spokenOrders immediately (prevents race where multiple refresh calls schedule speak).
+  - Schedules actual speech after small delay; if SpeechSynthesis is busy, adds a slightly larger delay.
+*/
+function speakOrderForKey(key, num){
+  if(!key) return;
+  if(spokenOrders.has(key)) return;
+  // Reserve as spoken right away
+  spokenOrders.add(key);
+
+  const utterFn = ()=>{
+    try{
+      const msg = new SpeechSynthesisUtterance(`Заказ номер ${num} готов`);
+      msg.lang = 'ru-RU';
+      msg.rate = 1;
+      msg.volume = 1;
+      // don't cancel global speech here — allow a small beep first
+      // we'll play a short beep and then speak (keeps UX consistent)
+      try{
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.value = 880;
+        g.gain.value = 0.06;
+        o.connect(g); g.connect(ctx.destination);
+        o.start();
+        setTimeout(()=>{ o.stop(); ctx.close(); }, 120);
+      }catch(_){}
+      // If something is speaking, schedule a tiny delay to avoid overlap
+      if(speechSynthesis.speaking){
+        setTimeout(()=> {
+          try{ speechSynthesis.speak(msg); }catch(_){}
+        }, 420);
+      } else {
+        try{ speechSynthesis.speak(msg); }catch(_){}
+      }
+    }catch(e){
+      console.warn('TTS failed', e);
+    }
+  };
+
+  // schedule after a short debounce to avoid duplicate scheduling from rapid events
+  const baseDelay = 120; // ms
+  setTimeout(utterFn, baseDelay);
 }
 
+/* refresh: re-render columns; only orders from bound terminals show */
 function refresh(){
   listCooking.innerHTML='';
   listReady.innerHTML='';
   if(terminals.length === 0) return;
 
-  for(const [,o] of orders){
+  for(const [key, o] of orders){
     if(!terminals.includes(o.terminalId)) continue;
 
-    if(
-      o.status === 'waiting_for_cash' ||
-      o.status === 'rejected'
-    ) continue;
+    // skip statuses that shouldn't be shown
+    if(o.status === 'waiting_for_cash' || o.status === 'rejected') continue;
 
     if(o.status === 'cooking'){
       listCooking.appendChild(renderOrder(o.orderNumber));
@@ -318,7 +360,8 @@ function refresh(){
 
     if(o.status === 'ready' || o.status === 'completed'){
       listReady.appendChild(renderOrder(o.orderNumber));
-      speakOrder(o.orderNumber);
+      // speak only once per firebase key
+      speakOrderForKey(key, o.orderNumber);
     }
   }
 }
@@ -345,9 +388,26 @@ ref.on('child_changed', s=>{
   refresh();
 });
 ref.on('child_removed', s=>{
-  orders.delete(s.key);
+  // Remove order from map and also clear spoken marker if present
+  const key = s.key;
+  orders.delete(key);
+  // It's OK to keep spokenOrders entries (they prevent re-announcement),
+  // but if you want to re-allow same orderNumber in future under new key, don't clear here.
   refresh();
 });
+
+/* Optional: initial load to populate orders map (not required with listeners, but safe on startup) */
+(async function initOnce(){
+  try{
+    const snap = await ref.once('value');
+    snap.forEach(child=>{
+      orders.set(child.key, child.val());
+    });
+    refresh();
+  }catch(e){
+    console.warn('init load failed', e);
+  }
+})();
 </script>
 </body>
 </html>

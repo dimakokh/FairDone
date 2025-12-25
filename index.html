@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FairDone — Показ заказов</title>
+<title>FireKiosk — Показ заказов</title>
 
 <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
@@ -53,6 +53,9 @@ header{
   width:48px;
   height:48px;
   cursor:pointer;
+  /* placeholder visual for logo */
+  background: linear-gradient(135deg,#ff7043,#c62828);
+  border-radius:8px;
 }
 
 .board{
@@ -114,7 +117,7 @@ header{
   background:var(--card);
   color:var(--text);
   padding:20px;
-  width:340px;
+  width:360px;
   border-radius:16px;
   border:1px solid var(--border);
 }
@@ -150,7 +153,7 @@ header{
 <div class="app">
 
 <header>
-  <div id="logo"></div>
+  <div id="logo" title="Три клика — персональное меню"></div>
   <div style="font-size:20px;font-weight:800">
     FairDone — твой заказ здесь
   </div>
@@ -193,40 +196,36 @@ header{
 </div>
 
 <script>
-/* STATE */
-const body = document.body;
-const listCooking = document.getElementById('listCooking');
-const listReady   = document.getElementById('listReady');
-
 /*
- orders: Map<firebaseKey, orderObject>
- terminals: array of terminal IDs saved in localStorage
- spokenOrders: Set of firebase keys we've already announced (prevents duplicates)
+  Полная логика:
+  - при загрузке берём только orders со статусом 'cooking' (готовые не подгружаем)
+  - при child_changed: если статус стал 'ready' (или 'completed'), показываем в Ready, озвучиваем один раз, ставим таймер 2 минуты на локальное удаление
+  - если таймер уже есть — не дублируем
+  - при перезагрузке все локальные таймеры сбрасываются => готовые которые до этого висели не показываются (т.к. мы их не грузим на init)
+  - персональное меню: три клика на логотип — привязка терминалов, сохраняется в localStorage
 */
-let orders = new Map();
-let terminals = JSON.parse(localStorage.getItem('terminals') || '[]');
-let spokenOrders = new Set();
 
-/* THEME */
+const listCooking = document.getElementById('listCooking');
+const listReady = document.getElementById('listReady');
+
+// Основные хранилища
+const orders = new Map();        // key -> orderObject (локальная копия для рендера)
+const prevStatus = new Map();    // key -> last known status (для обнаружения переходов)
+const readyTimers = new Map();   // key -> timeoutId (удаление через 2 минуты)
+const announced = new Set();     // key -> уже озвучивали
+
+// Привязанные терминалы
+let terminals = JSON.parse(localStorage.getItem('terminals') || '[]');
+
+// UI элементы staff menu
 const themeToggle = document.getElementById('themeToggle');
 const savedTheme = localStorage.getItem('theme');
-
-if(savedTheme === 'light'){
-  body.classList.add('light');
-  themeToggle.checked = true;
-}
-
-themeToggle.onchange = ()=>{
-  if(themeToggle.checked){
-    body.classList.add('light');
-    localStorage.setItem('theme','light');
-  }else{
-    body.classList.remove('light');
-    localStorage.setItem('theme','dark');
-  }
+if(savedTheme === 'light'){ document.body.classList.add('light'); themeToggle.checked = true; }
+themeToggle.onchange = ()=> {
+  if(themeToggle.checked){ document.body.classList.add('light'); localStorage.setItem('theme','light'); }
+  else { document.body.classList.remove('light'); localStorage.setItem('theme','dark'); }
 };
 
-/* STAFF MENU */
 const logo = document.getElementById('logo');
 const staffMenu = document.getElementById('staffMenu');
 const terminalInput = document.getElementById('terminalInput');
@@ -236,26 +235,24 @@ const terminalList = document.getElementById('terminalList');
 const closeStaff = document.getElementById('closeStaff');
 
 let clicks = 0;
-logo.onclick = ()=>{
+logo.onclick = ()=> {
   clicks++;
-  setTimeout(()=>clicks=0,400);
+  setTimeout(()=> clicks = 0, 450);
   if(clicks === 3){
-    staffMenu.style.display = 'flex';
     renderTerminals();
+    staffMenu.style.display = 'flex';
     clicks = 0;
   }
 };
-
-closeStaff.onclick = ()=>{
-  staffMenu.style.display = 'none';
-};
+closeStaff.onclick = ()=> staffMenu.style.display = 'none';
 
 addTerminal.onclick = ()=>{
   const id = terminalInput.value.trim();
-  if(!id || terminals.includes(id)) return;
+  if(!id) return;
+  if(terminals.includes(id)) { terminalInput.value = ''; return; }
   terminals.push(id);
-  localStorage.setItem('terminals',JSON.stringify(terminals));
-  terminalInput.value='';
+  localStorage.setItem('terminals', JSON.stringify(terminals));
+  terminalInput.value = '';
   renderTerminals();
   refresh();
 };
@@ -268,15 +265,17 @@ resetBtn.onclick = ()=>{
 };
 
 function renderTerminals(){
-  terminalList.innerHTML='';
+  terminalList.innerHTML = '';
+  if(terminals.length === 0){ terminalList.innerHTML = '<div style="opacity:.6">Нет привязанных терминалов</div>'; return; }
   terminals.forEach(t=>{
-    const row=document.createElement('div');
-    row.textContent=t;
-    const del=document.createElement('button');
-    del.textContent='×';
-    del.onclick=()=>{
-      terminals=terminals.filter(x=>x!==t);
-      localStorage.setItem('terminals',JSON.stringify(terminals));
+    const row = document.createElement('div');
+    row.textContent = t;
+    const del = document.createElement('button');
+    del.textContent = '×';
+    del.style.marginLeft = '8px';
+    del.onclick = ()=>{
+      terminals = terminals.filter(x => x !== t);
+      localStorage.setItem('terminals', JSON.stringify(terminals));
       renderTerminals();
       refresh();
     };
@@ -285,34 +284,22 @@ function renderTerminals(){
   });
 }
 
-/* ORDERS UI helpers */
-function renderOrder(num){
-  const d=document.createElement('div');
-  d.className='order';
-  d.textContent=num;
+// Helper: рендер карточки заказа (только цифры)
+function renderOrderCard(num){
+  const d = document.createElement('div');
+  d.className = 'order';
+  d.textContent = num;
   return d;
 }
 
-/*
-  speakOrderForKey:
-  - Uses firebase key as identifier to avoid duplicate announcements for same orderNumber reused elsewhere.
-  - Adds key to spokenOrders immediately (prevents race where multiple refresh calls schedule speak).
-  - Schedules actual speech after small delay; if SpeechSynthesis is busy, adds a slightly larger delay.
-*/
-function speakOrderForKey(key, num){
-  if(!key) return;
-  if(spokenOrders.has(key)) return;
-  // Reserve as spoken right away
-  spokenOrders.add(key);
-
-  const utterFn = ()=>{
+// Speak once per firebase key
+function speakOrder(key, orderNumber){
+  if(!key || announced.has(key)) return;
+  announced.add(key); // пометим сразу
+  // короткая задержка + звуковой сигнал
+  setTimeout(()=>{
     try{
-      const msg = new SpeechSynthesisUtterance(`Заказ номер ${num} готов`);
-      msg.lang = 'ru-RU';
-      msg.rate = 1;
-      msg.volume = 1;
-      // don't cancel global speech here — allow a small beep first
-      // we'll play a short beep and then speak (keeps UX consistent)
+      // beep
       try{
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         const o = ctx.createOscillator();
@@ -324,49 +311,50 @@ function speakOrderForKey(key, num){
         o.start();
         setTimeout(()=>{ o.stop(); ctx.close(); }, 120);
       }catch(_){}
-      // If something is speaking, schedule a tiny delay to avoid overlap
-      if(speechSynthesis.speaking){
-        setTimeout(()=> {
-          try{ speechSynthesis.speak(msg); }catch(_){}
-        }, 420);
-      } else {
-        try{ speechSynthesis.speak(msg); }catch(_){}
-      }
-    }catch(e){
-      console.warn('TTS failed', e);
-    }
-  };
 
-  // schedule after a short debounce to avoid duplicate scheduling from rapid events
-  const baseDelay = 120; // ms
-  setTimeout(utterFn, baseDelay);
+      const utter = new SpeechSynthesisUtterance(`Заказ номер ${orderNumber} готов`);
+      utter.lang = 'ru-RU';
+      // если синтезатор уже говорит — отложим чуть
+      if(speechSynthesis.speaking){
+        setTimeout(()=> { try{ speechSynthesis.speak(utter); }catch(e){} }, 420);
+      } else {
+        try{ speechSynthesis.speak(utter); }catch(e){}
+      }
+    } catch(e){
+      console.warn('TTS error', e);
+    }
+  }, 140);
 }
 
-/* refresh: re-render columns; only orders from bound terminals show */
+// очистка таймера ready (если есть)
+function clearReadyTimer(key){
+  const t = readyTimers.get(key);
+  if(t) { clearTimeout(t); readyTimers.delete(key); }
+}
+
+// refresh UI: отрисовать cooking + ready (ready только локально когда появился)
 function refresh(){
-  listCooking.innerHTML='';
-  listReady.innerHTML='';
+  listCooking.innerHTML = '';
+  listReady.innerHTML = '';
+
   if(terminals.length === 0) return;
 
-  for(const [key, o] of orders){
-    if(!terminals.includes(o.terminalId)) continue;
+  for(const [key, order] of orders.entries()){
+    if(!terminals.includes(order.terminalId)) continue;
+    // ignore orders that are explicitly waiting_for_cash or rejected
+    if(order.status === 'waiting_for_cash' || order.status === 'rejected') continue;
 
-    // skip statuses that shouldn't be shown
-    if(o.status === 'waiting_for_cash' || o.status === 'rejected') continue;
-
-    if(o.status === 'cooking'){
-      listCooking.appendChild(renderOrder(o.orderNumber));
-    }
-
-    if(o.status === 'ready' || o.status === 'completed'){
-      listReady.appendChild(renderOrder(o.orderNumber));
-      // speak only once per firebase key
-      speakOrderForKey(key, o.orderNumber);
+    if(order.status === 'cooking'){
+      const card = renderOrderCard(order.orderNumber || key);
+      listCooking.appendChild(card);
+    } else if(order.status === 'ready' || order.status === 'completed'){
+      const card = renderOrderCard(order.orderNumber || key);
+      listReady.appendChild(card);
     }
   }
 }
 
-/* FIREBASE */
+/* FIREBASE config */
 firebase.initializeApp({
   apiKey: "AIzaSyABvY_6cHonbLvdBj5cYMSheJDLMd_-bNw",
   authDomain: "app-fairpay.firebaseapp.com",
@@ -379,35 +367,116 @@ firebase.initializeApp({
 
 const ref = firebase.database().ref('orders');
 
-ref.on('child_added', s=>{
-  orders.set(s.key,s.val());
-  refresh();
-});
-ref.on('child_changed', s=>{
-  orders.set(s.key,s.val());
-  refresh();
-});
-ref.on('child_removed', s=>{
-  // Remove order from map and also clear spoken marker if present
-  const key = s.key;
-  orders.delete(key);
-  // It's OK to keep spokenOrders entries (they prevent re-announcement),
-  // but if you want to re-allow same orderNumber in future under new key, don't clear here.
-  refresh();
-});
-
-/* Optional: initial load to populate orders map (not required with listeners, but safe on startup) */
-(async function initOnce(){
+// Инициализация: подгружаем только cooking (чтобы готовые не восстанавливались после перезагрузки)
+(async function initLoad(){
   try{
     const snap = await ref.once('value');
-    snap.forEach(child=>{
-      orders.set(child.key, child.val());
+    snap.forEach(child => {
+      const key = child.key;
+      const val = child.val();
+      // сохраняем prevStatus (для отслеживания переходов)
+      prevStatus.set(key, val.status);
+      // загрузим в память только если статус cooking (по требованию — ready НЕ показываем после reload)
+      if(val.status === 'cooking'){
+        orders.set(key, val);
+      }
     });
+    renderTerminals(); // отрисовать список терминалов из localStorage
     refresh();
-  }catch(e){
+  } catch(e){
     console.warn('init load failed', e);
   }
 })();
+
+// child_added: если сразу пришёл cooking — добавим; если ready — игнорируем (будем обрабатывать transition в child_changed)
+ref.on('child_added', snap => {
+  const key = snap.key;
+  const val = snap.val();
+  prevStatus.set(key, val.status);
+  if(val.status === 'cooking'){
+    orders.set(key, val);
+    refresh();
+  }
+  // если пришёл ready в child_added (редкий кейс) — не показываем его сразу (перезагрузка и т.п.)
+});
+
+// child_changed: основной обработчик переходов (включая cooking->ready)
+ref.on('child_changed', snap => {
+  const key = snap.key;
+  const val = snap.val();
+  const old = prevStatus.get(key);
+  prevStatus.set(key, val.status);
+
+  // Если статус стал ready/complete и раньше он не был ready — показываем и запускаем таймер + озвучку
+  const nowIsReady = (val.status === 'ready' || val.status === 'completed');
+  const wasReady = (old === 'ready' || old === 'completed');
+
+  if(nowIsReady && !wasReady){
+    // Добавим в локальную карту (чтобы показать в Ready)
+    orders.set(key, val);
+    refresh();
+
+    // Если уже есть таймер/аннонс — не создавать повторно
+    if(!announced.has(key) && !readyTimers.has(key)){
+      // пометим как анонсируемое и запустим озвучку
+      speakOrder(key, val.orderNumber || key);
+      // поставить таймер: через 2 минуты скрыть локально
+      const t = setTimeout(() => {
+        // удаляем только локально с сайта
+        orders.delete(key);
+        readyTimers.delete(key);
+        // если нужно — также можно удалить announced.delete(key) чтобы при новом ключе произнести снова
+        refresh();
+      }, 120000); // 2 минуты
+      readyTimers.set(key, t);
+      // отметим announced (speakOrder тоже добавляет, но на всякий случай)
+      announced.add(key);
+    }
+    return;
+  }
+
+  // Если статус превратился в cooking (например откат), покажем в cooking
+  if(val.status === 'cooking'){
+    // очистим готовые таймеры / маркировки, если были
+    clearReadyTimer(key);
+    announced.delete(key);
+    orders.set(key, val);
+    refresh();
+    return;
+  }
+
+  // Другие статусы: обновим/уберём из локального представления в зависимости от логики
+  if(val.status === 'waiting_for_cash' || val.status === 'rejected'){
+    // скрыть локально
+    clearReadyTimer(key);
+    orders.delete(key);
+    announced.delete(key);
+    refresh();
+    return;
+  }
+
+  // По умолчанию просто обновляем локальную запись и рендерим
+  orders.set(key, val);
+  refresh();
+});
+
+// child_removed: очистим всё, если запись удалили
+ref.on('child_removed', snap => {
+  const key = snap.key;
+  clearReadyTimer(key);
+  prevStatus.delete(key);
+  orders.delete(key);
+  announced.delete(key);
+  refresh();
+});
+
+// Прочие утилиты (например, если нужно очистить все timers при выгрузке)
+window.addEventListener('beforeunload', () => {
+  // таймеры не сохраняются намеренно (по требованию) — но чистим ресурсы
+  for(const t of readyTimers.values()) clearTimeout(t);
+  readyTimers.clear();
+});
+
 </script>
 </body>
 </html>
